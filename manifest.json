@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Reddit Company Scraper",
+  "version": "1.0",
+  "description": "Discovers where a brand is discussed on Reddit using your logged-in session, driven by the dashboard's own search box.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "permissions": [
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://old.reddit.com/*",
+    "https://reddit-scrapper-ncxc.onrender.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://reddit-scrapper-ncxc.onrender.com/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ]
+}
