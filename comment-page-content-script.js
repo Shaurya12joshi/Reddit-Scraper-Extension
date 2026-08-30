@@ -43,7 +43,7 @@ document.querySelectorAll('.thing.comment').forEach((el) => {
   })
 })
 
-console.log('[scraper] comment page content script ran —', comments.length, 'comments, body length', body.length)
+console.log('[scraper] comment page content script ran:', comments.length, 'comments, body length', body.length)
 
 chrome.runtime.sendMessage(
   {

@@ -1,17 +1,51 @@
 const DEFAULT_BACKEND_URL = 'https://reddit-scrapper-ncxc.onrender.com'
 let BACKEND_URL = DEFAULT_BACKEND_URL
 
-async function loadBackendUrl() {
-  const stored = (await chrome.storage.local.get('backendUrl')).backendUrl
-  BACKEND_URL = String(stored || DEFAULT_BACKEND_URL).replace(/\/$/, '')
+let PAGE_BACKEND_URL = null
+
+function normalise(value) {
+  const url = String(value || '').trim().replace(/\/$/, '')
+  if (!url) return null
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    return url
+  } catch {
+    return null
+  }
+}
+
+let STORED_BACKEND_URL = null
+
+function resolveBackendUrl() {
+  BACKEND_URL = STORED_BACKEND_URL || PAGE_BACKEND_URL || DEFAULT_BACKEND_URL
   return BACKEND_URL
+}
+
+async function loadBackendUrl() {
+  STORED_BACKEND_URL = normalise((await chrome.storage.local.get('backendUrl')).backendUrl)
+  return resolveBackendUrl()
+}
+
+function usePageBackend(value) {
+  const url = normalise(value)
+  if (!url) return
+  PAGE_BACKEND_URL = url
+  resolveBackendUrl()
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.backendUrl) {
-    BACKEND_URL = String(changes.backendUrl.newValue || DEFAULT_BACKEND_URL).replace(/\/$/, '')
+    STORED_BACKEND_URL = normalise(changes.backendUrl.newValue)
+    resolveBackendUrl()
   }
 })
+
+function phraseQuery(value) {
+  const term = String(value || '').trim()
+  if (!term || term.startsWith('"')) return term
+  return /\s/.test(term) ? `"${term}"` : term
+}
 
 const DEPTH = { SHALLOW: 'shallow', DEEP: 'deep' }
 
@@ -25,6 +59,7 @@ const COMMUNITY_LIMIT = 100
 const SUB_RATE_SAMPLE = 100
 const COMMENTS_PER_THREAD = 40
 const MAX_RULE_FETCHES = 2
+const FIELD_QUERIES = 8
 const DEEP_THREAD_LIMIT = 30
 const DEEP_CONCURRENCY = 3
 
@@ -142,7 +177,7 @@ async function loadRateState() {
   if (Number.isFinite(stored.refusedAt) && stored.refusedAt >= MIN_REQUESTS_PER_WINDOW) {
     const recordedAt = Number(stored.refusedAtRecordedAt) || 0
     if (recordedAt && now - recordedAt > REFUSAL_MEMORY_MS) {
-      console.warn('[scraper] last refusal is over 24h old — forgetting it and re-testing the ceiling')
+      console.warn('[scraper] last refusal is over 24h old, forgetting it and re-testing the ceiling')
       refusedAt = Infinity
       refusedAtRecordedAt = 0
     } else {
@@ -167,7 +202,7 @@ function learnFromRefusal() {
 
   if (spent < meaningful) {
     console.warn(
-      `[scraper] refused after only ${spent} request(s) this minute — a lockout still in ` +
+      `[scraper] refused after only ${spent} request(s) this minute, a lockout still in ` +
         `force, not a new limit. Cap stays at ${learnedLimit}/min.`,
     )
     return
@@ -374,7 +409,7 @@ async function redditJson(url, attempt = 0) {
   const contentType = response.headers.get('content-type') || ''
   if (!response.ok || !contentType.includes('json')) {
     if (!contentType.includes('json') && (response.status === 403 || response.status === 503)) {
-      console.warn(`[scraper] non-JSON response at ${response.status} — likely an edge block, not a rate limit`)
+      console.warn(`[scraper] non-JSON response at ${response.status}, likely an edge block, not a rate limit`)
       throw new Error(
         'Reddit blocked this request at the edge (not a rate limit). This browser session may need ' +
           're-authenticating on reddit.com.',
@@ -393,6 +428,26 @@ async function redditJson(url, attempt = 0) {
   }
   responseCache.set(url, data)
   return data
+}
+
+const REDDIT_HOSTS = ['https://old.reddit.com', 'https://www.reddit.com']
+
+async function searchJson(path, { required = false } = {}) {
+  let firstError = null
+
+  for (const host of REDDIT_HOSTS) {
+    try {
+      const data = await redditJson(`${host}${path}`)
+      if (postsFrom(data).length || host === REDDIT_HOSTS[REDDIT_HOSTS.length - 1]) return data
+    } catch (error) {
+      if (isStopSignal(error)) throw error
+      firstError = firstError || error
+      console.warn(`[scraper] ${host} failed:`, error.message)
+    }
+  }
+
+  if (required && firstError) throw firstError
+  return null
 }
 
 async function redditJsonSafe(url) {
@@ -464,10 +519,10 @@ const postsFrom = (data) =>
 async function collect(target, depth = DEPTH.SHALLOW) {
   switch (target.kind) {
     case 'search': {
-      const base = target.subreddit
-        ? `https://old.reddit.com/r/${target.subreddit}/search.json?q=${encodeURIComponent(target.query)}` +
+      const path = target.subreddit
+        ? `/r/${target.subreddit}/search.json?q=${encodeURIComponent(target.query)}` +
           `&restrict_sr=1&sort=${target.sort || 'new'}&t=all&limit=${target.limit || COMMUNITY_LIMIT}`
-        : `https://old.reddit.com/search.json?q=${encodeURIComponent(target.query)}` +
+        : `/search.json?q=${encodeURIComponent(target.query)}` +
           `&sort=${target.sort || 'relevance'}&limit=${target.limit || 100}`
 
       const posts = []
@@ -475,8 +530,8 @@ async function collect(target, depth = DEPTH.SHALLOW) {
       const pages = depth === DEPTH.DEEP ? target.pages || SEED_PAGES : target.pages || 1
 
       for (let page = 0; page < pages; page++) {
-        const url = after ? `${base}&after=${after}` : base
-        const data = target.required ? await redditJson(url) : await redditJsonSafe(url)
+        const suffix = after ? `&after=${after}` : ''
+        const data = await searchJson(`${path}${suffix}`, { required: target.required })
         posts.push(...postsFrom(data))
 
         after = data?.data?.after
@@ -628,7 +683,74 @@ class Candidates {
   }
 }
 
-async function runScrape(company) {
+async function runFieldScan(field) {
+  await setJob({ status: 'running', company: field, step: `Mapping the ${field} field…` })
+
+  readsUsed = 0
+  successStreak = 0
+  currentDelay = DELAY_MS
+  rateRemaining = Infinity
+  rateResetAt = 0
+  responseCache.clear()
+
+  await loadBackendUrl()
+  await loadRateState()
+
+  try {
+    const plan = await backend(`/api/field-plan?keywords=${encodeURIComponent(field)}`)
+    const queries = plan?.queries ?? []
+
+    if (!queries.length) {
+      await setJob({ status: 'error', step: `Could not map the "${field}" field.` })
+      return
+    }
+
+    const posts = new Map()
+
+    for (const query of queries.slice(0, FIELD_QUERIES + 4)) {
+      if (!hasBudget()) break
+      await pace()
+      await setJob({ step: `Searching the field: ${query.term}…` })
+      const hits = await collect(
+        { kind: 'search', query: phraseQuery(query.term), sort: 'relevance' },
+        DEPTH.SHALLOW,
+      )
+      for (const post of hits.posts) posts.set(post.id, post)
+    }
+
+    if (!posts.size) {
+      await setJob({ status: 'error', step: `No Reddit discussions found about ${field}.` })
+      return
+    }
+
+    await setJob({ step: `Saving ${posts.size} field discussions…` })
+    const final = await backend('/api/ingest', {
+      company: field,
+      posts: [...posts.values()],
+      scope: 'field',
+      phase: 'field',
+    })
+
+    const subCount = new Set([...posts.values()].map((post) => post.subreddit)).size
+    await setJob({
+      status: 'done',
+      step:
+        `Done: ${posts.size} discussions about ${field} across ${subCount} subreddits.` +
+        (final?.total ? ` ${final.total} stored in total.` : ''),
+      count: posts.size,
+      collected: posts.size,
+      fieldCollected: posts.size,
+      stored: final?.total ?? null,
+    })
+  } catch (error) {
+    console.error('[scraper] field scan failed:', error)
+    await setJob({ status: 'error', step: error?.message || 'The field scan stopped unexpectedly.' })
+  } finally {
+    await saveRateState()
+  }
+}
+
+async function runScrape(company, keywords = '') {
   await setJob({ status: 'running', company, step: 'Searching Reddit…' })
 
   readsUsed = 0
@@ -653,16 +775,70 @@ async function runScrape(company) {
     }
 
     const known = new Set((await backend(`/api/known-ids?company=${encodeURIComponent(company)}`))?.ids ?? [])
+    const fieldPosts = new Map()
 
     const seed = await collect(
-      { kind: 'search', query: company, sort: 'relevance', required: true, pages: SEED_PAGES },
+      { kind: 'search', query: phraseQuery(company), sort: 'relevance', required: true, pages: SEED_PAGES },
       DEPTH.DEEP,
     )
     mergePosts(seed.posts)
     candidates.addPosts(seed.posts, 'global', 1)
 
+    let fieldPlan = null
+    if (keywords) {
+      await setJob({ step: `Mapping the ${keywords} field…` })
+      fieldPlan = await backend(
+        `/api/field-plan?keywords=${encodeURIComponent(keywords)}` +
+          `&company=${encodeURIComponent(company)}`,
+      )
+
+      for (const query of (fieldPlan?.queries ?? []).slice(0, FIELD_QUERIES)) {
+        if (!hasBudget()) break
+        await pace()
+        await setJob({ step: `Searching the field: ${query.term}…` })
+        const hits = await collect(
+          { kind: 'search', query: phraseQuery(query.term), sort: 'relevance' },
+          DEPTH.SHALLOW,
+        )
+        for (const post of hits.posts) {
+          if (!byId.has(post.id)) fieldPosts.set(post.id, post)
+        }
+        candidates.addPosts(hits.posts, `field:${query.kind}`, 1.2)
+      }
+
+      if (fieldPosts.size) {
+        await setJob({ step: `Saving ${fieldPosts.size} field discussions…` })
+        await backend('/api/ingest', {
+          company,
+          posts: [...fieldPosts.values()],
+          scope: 'field',
+          phase: 'field',
+        })
+      }
+    }
+
+    if (byId.size === 0 && fieldPosts.size > 0) {
+      await setJob({
+        status: 'done',
+        step:
+          `No Reddit threads mention "${company}" itself, but ${fieldPosts.size} discussions ` +
+          'about its field were collected. The report covers the field.',
+        count: fieldPosts.size,
+        collected: fieldPosts.size,
+        fieldCollected: fieldPosts.size,
+      })
+      return
+    }
+
     if (byId.size === 0) {
-      await setJob({ status: 'error', step: `No Reddit posts found for "${company}".` })
+      await setJob({
+        status: 'error',
+        step:
+          `Reddit returned no results for "${company}"` +
+          (keywords ? ' or its field' : '') +
+          '. Open reddit.com in this browser and check you are signed in and not being ' +
+          'shown a block or consent page, then run it again.',
+      })
       return
     }
 
@@ -673,7 +849,7 @@ async function runScrape(company) {
 
     try {
       await pace()
-      const fresh = await collect({ kind: 'search', query: company, sort: 'new' }, DEPTH.SHALLOW)
+      const fresh = await collect({ kind: 'search', query: phraseQuery(company), sort: 'new' }, DEPTH.SHALLOW)
       mergePosts(fresh.posts)
       candidates.addPosts(fresh.posts, 'recent', 1.5)
 
@@ -691,7 +867,7 @@ async function runScrape(company) {
         await pace()
         await setJob({ step: `Reading more of the ${company} discussion (page ${page + 1}/${BASE_SEARCH_PAGES})…` })
         const hits = await collect(
-          { kind: 'search', query: company, sort: 'relevance', pages: 1, after: cursor },
+          { kind: 'search', query: phraseQuery(company), sort: 'relevance', pages: 1, after: cursor },
           DEPTH.SHALLOW,
         )
         mergePosts(hits.posts)
@@ -719,7 +895,7 @@ async function runScrape(company) {
         await pace()
 
         const inSub = await collect(
-          { kind: 'search', query: company, subreddit: sub, sort: 'new' },
+          { kind: 'search', query: phraseQuery(company), subreddit: sub, sort: 'new' },
           DEPTH.SHALLOW,
         )
 
@@ -884,6 +1060,7 @@ async function runScrape(company) {
       status: 'done',
       step:
         `Done: ${discovered.length} posts across ${subCount} subreddits, ` +
+        (fieldPosts.size ? `${fieldPosts.size} from the wider field, ` : '') +
         `${comments.length} comments from ${deepened.length} of the ` +
         `${threadTargets.length} highest-value threads.` +
         (final?.total ? ` ${final.total} stored in total.` : '') +
@@ -892,6 +1069,9 @@ async function runScrape(company) {
             'Run it again to go deeper.'
           : ''),
       count: discovered.length + comments.length,
+      collected: discovered.length + comments.length,
+      fieldCollected: fieldPosts.size,
+      stored: final?.total ?? null,
       partial: stoppedEarly,
       reads: readsUsed,
     })
@@ -911,7 +1091,13 @@ async function runScrape(company) {
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type !== 'START_SCRAPE') return
 
-  runScrape(message.company).catch(async (error) => {
+  usePageBackend(message.apiBase)
+
+  const job = message.fieldOnly
+    ? runFieldScan(message.keywords)
+    : runScrape(message.company, message.keywords)
+
+  job.catch(async (error) => {
     console.error('[scraper] run failed outright:', error)
     await setJob({ status: 'error', step: error?.message || 'The collector stopped unexpectedly.' })
   })

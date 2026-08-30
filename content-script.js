@@ -36,7 +36,7 @@ document.querySelectorAll('.search-result-link').forEach((el) => {
 
 const query = new URLSearchParams(location.search).get('q') || ''
 
-console.log('[scraper] search content script ran —', posts.length, 'posts scraped for', query)
+console.log('[scraper] search content script ran:', posts.length, 'posts scraped for', query)
 
 chrome.runtime.sendMessage({ type: 'SEARCH_RESULTS', query, posts }, () => {
   if (chrome.runtime.lastError) {

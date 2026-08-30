@@ -7,7 +7,12 @@ function announce() {
 
 const extensionAlive = () => Boolean(chrome.runtime?.id)
 
+function announceOrphaned() {
+  window.postMessage({ source: EXT_SOURCE, type: 'ORPHANED' }, window.location.origin)
+}
+
 function reportOrphaned() {
+  announceOrphaned()
   window.postMessage(
     {
       source: EXT_SOURCE,
@@ -32,6 +37,7 @@ window.addEventListener('message', (event) => {
 
   if (message.type === 'PING') {
     if (extensionAlive()) announce()
+    else announceOrphaned()
     return
   }
 
@@ -42,7 +48,13 @@ window.addEventListener('message', (event) => {
     }
 
     try {
-      chrome.runtime.sendMessage({ type: 'START_SCRAPE', company: message.company })
+      chrome.runtime.sendMessage({
+        type: 'START_SCRAPE',
+        company: message.company,
+        keywords: message.keywords || '',
+        fieldOnly: Boolean(message.fieldOnly),
+        apiBase: message.apiBase || window.location.origin,
+      })
     } catch (error) {
       console.warn('[bridge] could not reach the extension:', error.message)
       reportOrphaned()
