@@ -1,3 +1,9 @@
+// LEGACY — dead code, not referenced by manifest.json. From before the
+// scraper switched to fetching Reddit's JSON API directly (see
+// background/reddit-client.js) — this instead scraped a rendered
+// old.reddit.com search-results page's DOM directly. Would have been
+// injected via chrome.scripting into a Reddit search tab and reported its
+// results back to the background worker with a SEARCH_RESULTS message.
 function parseCount(text) {
   if (!text) return null
   const match = text.replace(/,/g, '').match(/\d+/)

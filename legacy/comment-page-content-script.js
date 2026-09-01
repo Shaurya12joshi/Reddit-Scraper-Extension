@@ -1,3 +1,9 @@
+// LEGACY — dead code, not referenced by manifest.json. Companion to
+// legacy/content-script.js from the old DOM-scraping approach: would have
+// been injected into an individual Reddit thread page to scrape its post
+// body and top comments straight out of the rendered page, reporting back
+// via a DETAIL_RESULT message. Superseded by background/collectors.js's
+// 'thread' case, which fetches the same data as JSON instead.
 function parseScore(entry) {
   const scoreEl = entry ? entry.querySelector('.score.unvoted') : null
   if (!scoreEl) return null
